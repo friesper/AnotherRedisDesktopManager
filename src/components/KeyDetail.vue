@@ -2,31 +2,54 @@
   <div>
     <el-container direction="vertical" class="key-tab-container">
       <!-- key info -->
-      <KeyHeader ref="keyHeader" :client='client' :redisKey="redisKey" :keyType="keyType" :syncKeyParams = "syncKeyParams" @refreshContent='refreshContent' class="key-header-info"></KeyHeader>
+      <KeyHeader
+        ref="keyHeader"
+        :client='client'
+        :redisKey="redisKey"
+        :keyType="keyType"
+        @refreshContent='refreshContent'
+        @dumpCommand='dumpCommand'
+        :hotKeyScope='hotKeyScope'
+        class="key-header-info">
+      </KeyHeader>
 
       <!-- key content -->
-      <component ref="keyContent" :is="componentName" :client='client' :redisKey="redisKey" :syncKeyParams = "syncKeyParams" class="key-content-container"></component>
+      <component
+        ref="keyContent"
+        :is="componentName"
+        :client='client'
+        :redisKey="redisKey"
+        :hotKeyScope='hotKeyScope'
+        class="key-content-container">
+      </component>
     </el-container>
   </div>
 </template>
 
 <script>
 import KeyHeader from '@/components/KeyHeader';
-import KeyContentString from '@/components/KeyContentString';
-import KeyContentHash from '@/components/KeyContentHash';
-import KeyContentSet from '@/components/KeyContentSet';
-import KeyContentZset from '@/components/KeyContentZset';
-import KeyContentList from '@/components/KeyContentList';
+import KeyContentString from '@/components/contents/KeyContentString';
+import KeyContentHash from '@/components/contents/KeyContentHash';
+import KeyContentSet from '@/components/contents/KeyContentSet';
+import KeyContentZset from '@/components/contents/KeyContentZset';
+import KeyContentList from '@/components/contents/KeyContentList';
+import KeyContentStream from '@/components/contents/KeyContentStream';
+import KeyContentReJson from '@/components/contents/KeyContentReJson';
 
 export default {
   data() {
-    return {
-      syncKeyParams: { keyTTL: '', keyName: this.redisKey },
-    };
+    return {};
   },
-  props: ['client', 'redisKey', 'keyType'],
+  props: ['client', 'redisKey', 'keyType', 'hotKeyScope'],
   components: {
-    KeyHeader, KeyContentString, KeyContentHash, KeyContentSet, KeyContentZset, KeyContentList
+    KeyHeader,
+    KeyContentString,
+    KeyContentHash,
+    KeyContentSet,
+    KeyContentZset,
+    KeyContentList,
+    KeyContentStream,
+    KeyContentReJson,
   },
   computed: {
     componentName() {
@@ -37,28 +60,40 @@ export default {
     getComponentNameByType(keyType) {
       const map = {
         string: 'KeyContentString',
-        hash  : 'KeyContentHash',
-        zset  : 'KeyContentZset',
-        set   : 'KeyContentSet',
-        list  : 'KeyContentList',
+        hash: 'KeyContentHash',
+        zset: 'KeyContentZset',
+        set: 'KeyContentSet',
+        list: 'KeyContentList',
+        stream: 'KeyContentStream',
+        'ReJSON-RL': 'KeyContentReJson',
       };
 
-      return map[keyType];
+      if (map[keyType]) {
+        return map[keyType];
+      }
+      // type not support, such as bf
+
+      this.$message.error(this.$t('message.key_type_not_support'));
+      return '';
     },
     refreshContent() {
-      this.$refs.keyContent.initShow();
-    },
-    refreshAfterAdd(key) {
-      this.$bus.$emit('clickedKey', this.client, key);
-      this.$bus.$emit('refreshKeyList', this.client);
-    },
-    emptyKeyWhenAdding() {
-      this.$message.error({
-        message: this.$t('message.enter_new_key'),
-        duration: 2000,
-      });
+      this.client.exists(this.redisKey).then((reply) => {
+        if (reply == 0) {
+          // clear interval if auto refresh opened
+          // this.$refs.keyHeader.removeInterval();
+          return this.$message.error({
+            message: this.$t('message.key_not_exists'),
+            duration: 1000,
+          });
+        }
 
-      this.$refs.keyHeader.$refs.keyNameInput.focus();
+        this.$refs.keyContent && this.$refs.keyContent.initShow();
+      }).catch((e) => {
+        this.$message.error(`Exists Error: ${e.message}`);
+      });
+    },
+    dumpCommand() {
+      this.$refs.keyContent && this.$refs.keyContent.dumpCommand();
     },
   },
 };
@@ -66,7 +101,7 @@ export default {
 
 <style type="text/css">
   .key-tab-container {
-    padding-left: 5px;
+    /*padding-left: 5px;*/
   }
   .key-header-info {
     margin-top: 15px;
@@ -78,5 +113,34 @@ export default {
     width: 60%;
     height: 24px;
     padding: 0 5px;
+  }
+
+  /*tooltip in table width limit*/
+  .el-tooltip__popper {
+    max-width: 50%;
+  }
+
+  .content-more-container {
+    text-align: center;
+    margin-top: 10px;
+  }
+  .content-more-container .content-more-btn {
+    width: 95%;
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+
+  /*data table list styles*/
+  .key-content-container .el-table {
+    border-radius: 3px;
+  }
+  /*table list height*/
+  .key-content-container .el-table .el-table__body td {
+    padding: 0px 0px;
+  }
+
+  /*table list border*/
+  .key-content-container .el-table--border td, .key-content-container .el-table--border th {
+    border-right-width: 0;
   }
 </style>

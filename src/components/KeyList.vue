@@ -1,143 +1,260 @@
 <template>
-  <!-- key list -->
-  <ul class='key-list'>
-    <RightClickMenu :items='rightMenus' :clickValue='key' :key='key' v-for='key of keyList'>
-      <li class='key-item' :title='key'  @click='clickKey(key, $event)'>{{key}}</li>
-    </RightClickMenu>
-  </ul>
+  <div>
+    <!-- key list -->
+    <component
+      :is="keyListType"
+      :config="config"
+      :client="client"
+      :keyList="keyList"
+      @exportBatch="exportBatch">
+    </component>
+
+    <div class='keys-load-more-wrapper'>
+      <!-- load more -->
+      <el-button
+        ref='scanMoreBtn'
+        class='load-more-keys'
+        :icon="searching && !loadingAll ? 'el-icon-loading' : ''"
+        :disabled='scanMoreDisabled || searching'
+        @click='refreshKeyList(false)'>
+        {{ $t('message.load_more_keys') }}
+      </el-button>
+
+      <!-- load all -->
+      <!-- fix el-tooltip 200ms delay when closing -->
+      <el-tooltip v-if='showLoadAllKeys' :disabled="!loadAllTooltip"
+        @mouseenter.native="loadAllTooltip=true" @mouseleave.native="loadAllTooltip=false"
+        effect="dark" :content="$t('message.load_all_keys_tip')"
+        placement="bottom" :open-delay=380 :enterable='false'>
+        <el-button
+          class='load-more-keys'
+          type= 'danger'
+          :icon="searching && loadingAll ? 'el-icon-loading' : ''"
+          :disabled='searching'
+          @click='loadAllKeys()'>
+          {{ $t('message.load_all_keys') }}
+        </el-button>
+      </el-tooltip>
+    </div>
+  </div>
 </template>
 
 <script type="text/javascript">
-import RightClickMenu from '@/components/RightClickMenu';
+import KeyListVirtualTree from '@/components/KeyListVirtualTree';
 
 export default {
   data() {
     return {
       keyList: [],
-      scanCursorList: [0],
-      keysPageSize: 50,
+      keyListType: 'KeyListVirtualTree',
       searchPageSize: 10000,
-      rightMenus: [
-        {
-          name: this.$t('message.open'),
-          click: (clickValue, event) => {
-            this.clickKey(clickValue, event, false);
-          },
-        },
-        {
-          name: this.$t('message.open_new_tab'),
-          click: (clickValue, event) => {
-            this.clickKey(clickValue, event, true);
-          },
-        },
-      ],
+      scanStreams: [],
+      scanningCount: 0,
+      scanMoreDisabled: false,
+      onePageKeysCount: 0,
+      loadAllTooltip: true,
+      loadingAll: false,
     };
   },
-  props: ['client'],
-  components: {RightClickMenu},
+  props: ['client', 'config', 'globalSettings'],
+  components: { KeyListVirtualTree },
+  computed: {
+    keysPageSize() {
+      const keysPageSize = parseInt(this.globalSettings.keysPageSize);
+
+      // custom defined size
+      if (keysPageSize) {
+        // cluster mode, pageSize = size / masterNodes
+        if (this.client.nodes) {
+          const nodeCount = this.client.nodes('master').length;
+          return nodeCount ? parseInt(keysPageSize / nodeCount) : keysPageSize;
+        }
+
+        // common mode
+        return keysPageSize;
+      }
+
+      return 500;
+    },
+    showLoadAllKeys() {
+      // force show
+      return true;
+      return this.globalSettings.showLoadAllKeys;
+    },
+    searching() {
+      return this.$parent.$parent.$parent.$refs.operateItem.searchIcon == 'el-icon-loading';
+    },
+  },
   created() {
-    this.$bus.$on('refreshKeyList', (client, removeKey) => {
+    // add or remove key from key list directly
+    this.$bus.$on('refreshKeyList', (client, key = '', type = 'del') => {
       // refresh only self connection key list
       if (client !== this.client) {
         return;
       }
 
-      const match = this.getMatchMode();
-
-      // if in search mode, do not refresh list, because it may be slow.
-      if (match !== '*') {
-        removeKey && this.removeKeyFromKeyList(removeKey);
-        return;
+      // refresh directly
+      if (!key) {
+        return this.refreshKeyList();
       }
 
-      this.refreshKeyList();
+      (type == 'del') && this.removeKeyFromKeyList(key);
+      (type == 'add') && this.addKeyToKeyList(key);
     });
   },
   methods: {
     initShow() {
       this.refreshKeyList();
     },
-    clickKey(key, event = null, newTab = false) {
-      // highlight clicked key
-      event && this.hightKey(event);
-      this.$bus.$emit('clickedKey', this.client, key, newTab);
+    setDb(db) {
+      (this.client.condition.select != db) && this.client.select(db);
     },
-    hightKey(event) {
-      for (const ele of document.querySelectorAll('.key-select')) {
-        ele.classList.remove("key-select");
-      }
+    refreshKeyList(resetKeyList = true) {
+      // reset previous list, not append mode
+      resetKeyList && this.resetKeyList();
 
-      if (event) {
-        event.target.classList.add('key-select');
-      }
-    },
-    refreshKeyList(pushToCursorList = true) {
-      const searchExact = this.$parent.$refs.operateItem.searchExact;
+      // show searching status
+      this.setSearchStatus();
 
       // extract search
-      if (searchExact === true) {
-        this.refreshKeyListExact();
-        return true;
+      if (this.$parent.$parent.$parent.$refs.operateItem.searchExact === true) {
+        return this.refreshKeyListExact();
       }
 
-      const cursor = this.getScanCursor();
-      const match = this.getMatchMode();
-      const pageSize = (match === '*') ? this.keysPageSize : this.searchPageSize;
+      // init scanStream
+      if (!this.scanStreams.length) {
+        this.initScanStreamsAndScan();
+      }
 
-      // search loading
-      this.$parent.$refs.operateItem.searchIcon = 'el-icon-loading';
+      // scan more, resume previous scanStream
+      else {
+        // reset one page scan param
+        this.onePageKeysCount = 0;
 
-      const promise = this.beginScanning(cursor, match, pageSize, (reply, tmpShow = false) => {
-        // refresh key list
-        this.keyList = reply[1] ? reply[1].sort() : [];
-
-        if (tmpShow) {
-          return true;
+        for (const stream of this.scanStreams) {
+          stream.resume();
         }
-
-        pushToCursorList && this.scanCursorList.push(reply[0]);
-        this.$parent.$refs.pagenation.nextPageDisabled = (reply[0] === '0') ? true : false;
-
-        // search input icon recover
-        this.$parent.$refs.operateItem.searchIcon = 'el-icon-search';
-      });
-
-      return promise;
+      }
     },
-    beginScanning(cursor, match, count, callback, minLength = null, lastList = []) {
-      !minLength && (minLength = this.keysPageSize);
+    loadAllKeys() {
+      this.resetKeyList();
+      this.loadingAll = true;
 
-      const promise = this.client.scanAsync(cursor, 'MATCH', match, 'COUNT', count).then((reply) => {
-        reply[1] = reply[1].concat(lastList);
+      // show searching status
+      this.setSearchStatus();
+      this.initScanStreamsAndScan(true);
+    },
+    initScanStreamsAndScan(loadAll = false) {
+      const nodes = this.client.nodes ? this.client.nodes('master') : [this.client];
+      const keysPageSize = loadAll ? 50000 : this.keysPageSize;
+      this.scanningCount = nodes.length;
 
-        // key list length smaller than minLength
-        if ((reply[1].length < minLength) && (reply[0] !== '0')) {
-          callback && callback(reply, true);
-          return this.beginScanning(reply[0], match, count, callback, minLength, reply[1]);
-        }
+      nodes.map((node) => {
+        const scanOption = {
+          match: this.getMatchMode(),
+          count: keysPageSize,
+        };
 
-        callback && callback(reply);
+        // scan count is bigger when in search mode
+        scanOption.match != '*' && (scanOption.count = this.searchPageSize);
+
+        const stream = node.scanBufferStream(scanOption);
+        this.scanStreams.push(stream);
+
+        stream.on('data', (keys) => {
+          if (!keys.length) {
+            return;
+          }
+
+          this.keyList = this.keyList.concat(keys);
+          this.onePageKeysCount += keys.length;
+
+          // scan once reaches page size
+          if (this.onePageKeysCount >= keysPageSize && loadAll === false) {
+            // temp stop
+            stream.pause();
+            this.resetSearchStatus();
+          }
+        });
+
+        stream.on('error', (e) => {
+          this.resetSearchStatus();
+
+          // scan command disabled, other functions may be used normally
+          if (
+            (e.message.includes('unknown command') && e.message.includes('scan'))
+            || e.message.includes("command 'SCAN' is not allowed")
+          ) {
+            return this.$message.error({
+              message: this.$t('message.scan_disabled'),
+              duration: 1500,
+            });
+          }
+
+          // other errors
+          this.$message.error({
+            message: `Stream On Error: ${e.message}`,
+            duration: 1500,
+          });
+
+          setTimeout(() => {
+            this.$bus.$emit('closeConnection');
+          }, 50);
+        });
+
+        stream.on('end', () => {
+          // all nodes scan finished(cusor back to 0)
+          if (--this.scanningCount <= 0) {
+            this.scanMoreDisabled = true;
+            this.resetSearchStatus();
+          }
+        });
       });
-
-      return promise;
+    },
+    resetKeyList() {
+      // cancel scanning
+      this.cancelScanning();
+      this.keyList = [];
+      this.scanStreams = [];
+      this.onePageKeysCount = 0;
+      this.scanMoreDisabled = false;
+      this.loadingAll = false;
+    },
+    setSearchStatus() {
+      // search loading
+      this.$parent.$parent.$parent.$refs.operateItem.searchIcon = 'el-icon-loading';
+      // show cancel scanning btn after scanning for a while
+      this.$parent.$parent.$parent.$refs.operateItem.toggleCancelIcon(true);
+    },
+    resetSearchStatus() {
+      // search input icon recover
+      this.$parent.$parent.$parent.$refs.operateItem.searchIcon = 'el-icon-search';
+      // remove cancel scanning btn
+      this.$parent.$parent.$parent.$refs.operateItem.toggleCancelIcon(false);
+      // reset loading all status
+      this.loadingAll = false;
     },
     refreshKeyListExact() {
       const match = this.getMatchMode(false);
 
-      this.client.existsAsync(match).then((reply) => {
-        this.keyList = (reply === 1) ? [match] : [];
+      this.client.exists(match).then((reply) => {
+        this.keyList = (reply == 1) ? [Buffer.from(match)] : [];
+      }).catch((e) => {
+        this.$message.error(e.message);
+      }).finally(() => {
+        this.scanMoreDisabled = true;
+        this.resetSearchStatus();
       });
-
-      this.$parent.$refs.pagenation.nextPageDisabled = true;
     },
-    getScanCursor() {
-      const pageIndex = this.getPageIndex();
-      const cursorList = this.scanCursorList;
-
-      return cursorList[pageIndex - 1];
+    cancelScanning() {
+      if (this.scanStreams.length) {
+        for (const stream of this.scanStreams) {
+          stream.pause && stream.pause();
+        }
+      }
     },
     getMatchMode(fillStar = true) {
-      let match = this.$parent.$refs.operateItem.searchMatch;
+      let match = this.$parent.$parent.$parent.$refs.operateItem.searchMatch;
 
       match = match || '*';
 
@@ -147,60 +264,86 @@ export default {
 
       return match;
     },
-    getPageIndex() {
-      return this.$parent.$refs.pagenation.pageIndex;
-    },
     removeKeyFromKeyList(key) {
-      if (!key || !this.keyList) {
+      if (!this.keyList) {
         return false;
       }
 
-      const index = this.keyList.indexOf(key);
+      for (const i in this.keyList) {
+        if (this.keyList[i].equals(key)) {
+          this.keyList.splice(i, 1);
+          break;
+        }
+      }
+    },
+    addKeyToKeyList(key) {
+      if (!this.keyList) {
+        return false;
+      }
 
-      if (index > -1) {
-        this.keyList.splice(index, 1);
+      for (const i in this.keyList) {
+        if (this.keyList[i].equals(key)) {
+          // exists already
+          return;
+        }
+      }
+
+      this.keyList.push(key);
+    },
+    exportBatch(keys) {
+      const lines = [];
+      const failed = [];
+      const promiseQueue = [];
+
+      for (const key of keys) {
+        const promise = this.client.callBuffer('DUMP', key);
+        const promise1 = this.client.callBuffer('PTTL', key);
+        promiseQueue.push(promise, promise1);
+      }
+
+      Promise.allSettled(promiseQueue).then((reply) => {
+        for (let i = 0; i < reply.length; i += 2) {
+          if (reply[i].status === 'fulfilled') {
+            const key = keys[i / 2].toString('hex');
+            const value = reply[i].value.toString('hex');
+            const ttl = reply[i + 1].value;
+
+            const line = `${key},${value},${ttl}`;
+            lines.push(line);
+          }
+        }
+
+        // save to file
+        const file = `Dump_${(new Date()).toISOString().substr(0, 10).replaceAll('-', '')}.csv`;
+        this.$util.createAndDownloadFile(file, lines.join('\n'));
+      });
+    },
+  },
+  watch: {
+    globalSettings(newSetting, oldSetting) {
+      if (!this.client) {
+        return;
+      }
+      // keys number changed, reload scan streams
+      if (newSetting.keysPageSize != oldSetting.keysPageSize) {
+        this.refreshKeyList();
       }
     },
   },
-}
+};
 </script>
 
 <style type="text/css">
-  .connection-menu .key-list {
-    list-style-type: none;
-    padding-left: 0;
+  .keys-load-more-wrapper {
+    display: flex;
   }
-  .connection-menu .key-list .key-item {
-    white-space:nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    cursor: pointer;
-    color: #292f31;
-    font-size: 82%;
-    line-height: 1.6;
-    /*margin-right: 3px;*/
-    padding-left: 6px;
+  .keys-load-more-wrapper .load-more-keys {
+    margin: 10px 5px;
+    padding: 0;
+    display: block;
+    height: 22px;
+    width: 100%;
+    font-size: 75%;
   }
-  .dark-mode .connection-menu .key-list .key-item {
-    color: #f7f7f7;
-  }
-  .connection-menu .key-list .key-item:hover {
-    /*color: #3c3d3e;*/
-    background: #e7ebec;
-  }
-  .dark-mode .connection-menu .key-list .key-item:hover {
-    color: #f7f7f7;
-    background: #50616b;
-  }
-  .connection-menu .key-list .key-item.key-select {
-    color: #0b7ff7;
-    background: #e7ebec;
-    box-sizing: border-box;
-    border-left: 2px solid #68acf3;
-    padding-left: 4px;
-  }
-  .dark-mode .connection-menu .key-list .key-item.key-select {
-    color: #f7f7f7;
-    background: #50616b;
-  }
+
 </style>

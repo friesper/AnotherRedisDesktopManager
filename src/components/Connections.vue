@@ -1,82 +1,111 @@
 <template>
-  <div>
-    <el-menu ref="connectionMenu" @open="openConnection" class="connection-menu" active-text-color="#ffd04b">
-      <el-submenu v-for="(item, index) of connections" :key="item.connectionName" :index="item.connectionName">
-        <!-- connection menu -->
-        <ConnectionMenu
-          slot="title"
-          :config="item"
-          @refreshConnection='openConnection(item.connectionName)'>
-        </ConnectionMenu>
+  <div class="connections-list">
+    <div class="filter-input">
+      <el-input
+        v-if="connections.length>=filterEnableNum"
+        v-model="filterMode"
+        suffix-icon="el-icon-search"
+        :placeholder="$t('message.search_connection')"
+        clearable
+        size="mini">
+      </el-input>
+    </div>
+    <ConnectionWrapper
+      v-for="item, index of filteredConnections"
+      :key="item.key ? item.key : item.connectionName"
+      :index="index"
+      :globalSettings="globalSettings"
+      :config='item'>
+    </ConnectionWrapper>
 
-        <!-- db\key area -->
-        <ConnectionWrapper
-          :config='item'
-          :ref="'connectionWrapper'+index">
-        </ConnectionWrapper>
-      </el-submenu>
-    </el-menu>
+    <ScrollToTop parentNum='1' :posRight='false'></ScrollToTop>
   </div>
 </template>
 
-<script>
+<script type="text/javascript">
 import storage from '@/storage.js';
-import ConnectionMenu from '@/components/ConnectionMenu';
 import ConnectionWrapper from '@/components/ConnectionWrapper';
+import ScrollToTop from '@/components/ScrollToTop';
+import Sortable from 'sortablejs';
+
 
 export default {
   data() {
     return {
       connections: [],
+      globalSettings: this.$storage.getSetting(),
+      filterEnableNum: 4,
+      filterMode: '',
     };
   },
-  components: {ConnectionMenu, ConnectionWrapper},
+  components: { ConnectionWrapper, ScrollToTop },
   created() {
     this.$bus.$on('refreshConnections', () => {
       this.initConnections();
     });
-    this.$bus.$on('closeAllConnection', () => {
-      this.closeAllConnection();
+    this.$bus.$on('reloadSettings', (settings) => {
+      this.globalSettings = settings;
     });
+  },
+  computed: {
+    filteredConnections() {
+      if (!this.filterMode) {
+        return this.connections;
+      }
+
+      return this.connections.filter(item => {
+        return item.name.toLowerCase().includes(this.filterMode.toLowerCase());
+      });
+    },
   },
   methods: {
     initConnections() {
       const connections = storage.getConnections(true);
-      const slovedConnections = {};
+      const slovedConnections = [];
+      // this.connections = [];
 
       for (const item of connections) {
-        item.connectionName = this.initConnectionName(item);
-        slovedConnections[item.connectionName] = item;
+        item.connectionName = storage.getConnectionName(item);
+        // fix history bug, prevent db into config
+        delete item.db;
+        slovedConnections.push(item);
       }
 
       this.connections = slovedConnections;
     },
-    initConnectionName(connection) {
-      return connection.name || `${connection.host}@${connection.port}`;
-    },
-    openConnection(connectionName) {
-      this.$refs[`connectionWrapper${connectionName}`][0].openConnection();
-    },
-    closeAllConnection() {
-      // close all connection menu
-      for (const connectionName in this.connections) {
-        this.$refs.connectionMenu.close(connectionName);
-      }
-
-      this.$bus.$emit('closeRedisClient');
-      this.$bus.$emit('removeAllTab');
+    sortOrder() {
+      const dragWrapper = document.querySelector('.connections-list ');
+      Sortable.create(dragWrapper, {
+        handle: '.el-submenu__title',
+        animation: 400,
+        direction: 'vertical',
+        onEnd: (e) => {
+          const { newIndex } = e;
+          const { oldIndex } = e;
+          // change in connections
+          const currentRow = this.connections.splice(oldIndex, 1)[0];
+          this.connections.splice(newIndex, 0, currentRow);
+          // store
+          this.$storage.reOrderAndStore(this.connections);
+        },
+      });
     },
   },
   mounted() {
     this.initConnections();
+    this.sortOrder();
   },
 };
 </script>
 
 <style type="text/css">
-  .connection-menu {
-    margin-top: 10px;
-    padding-right: 6px;
-    border-right: 0;
+  .connections-list {
+    height: calc(100vh - 59px);
+    overflow-y: auto;
+    margin-top: 11px;
+  }
+  .connections-list .filter-input {
+    padding-right: 13px;
+    margin-bottom: 4px;
   }
 </style>

@@ -4,11 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <link rel="stylesheet" type="text/css" id="theme-link">
-    <title>Another Redis DeskTop Manager</title>
+    <title>Another Redis Desktop Manager</title>
   </head>
   <body>
     <!-- this script must be placed here after body -->
     <script type="text/javascript">
+      const ipcRenderer = require('electron').ipcRenderer;
+
       function globalChangeTheme(theme) {
         theme  && (localStorage.theme = theme);
         !theme && (theme = localStorage.theme);
@@ -19,9 +21,12 @@
         document.getElementById('theme-link').href = themeHref;
         themeName == 'dark' ? document.body.classList.add('dark-mode') :
                               document.body.classList.remove('dark-mode');
+
+        // change native theme
+        ipcRenderer.invoke('changeTheme', themeName);
       }
 
-      // theme init
+      // theme init start
       globalChangeTheme();
     </script>
 

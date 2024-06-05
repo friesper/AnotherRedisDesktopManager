@@ -5,12 +5,21 @@
       <el-row :gutter="6">
         <!-- db index select -->
         <el-col :span="12">
-          <el-select class="db-select" v-model="selectedDbIndex" placeholder="DB" size="mini" @change="changeDb()" filterable default-first-option>
+          <el-select class="db-select" v-model="selectedDbIndex" placeholder="DB" @change="changeDb()" filterable default-first-option>
             <el-option
               v-for="index in dbs"
               :key="index"
-              :label="'DB' + index"
+              :label="`DB${index}`"
               :value="index">
+              <span>
+                {{`DB${index}`}}
+                <span class="db-select-key-count" v-if="dbKeysCount[index]">[{{dbKeysCount[index]}}]</span>
+                <span class="db-select-custom-name">
+                  <span class="db-select-key-count">{{dbNames[index]}}</span>
+
+                  <span class="el-icon-edit-outline" @click.stop.prevent='customDbName(index)'></span>
+                </span>
+              </span>
             </el-option>
             <!-- <span slot="prefix" class="fa fa-sitemap" style="font-size: 80%"></span> -->
           </el-select>
@@ -20,14 +29,14 @@
         <el-col :span="12">
           <el-button class="new-key-btn" @click="newKeyDialog=true">
             <i class="el-icon-plus"></i>
-            {{ $t('message.add_new_key')}}
+            {{ $t('message.add_new_key') }}
           </el-button>
         </el-col>
       </el-row>
     </el-form-item>
 
     <!-- search match -->
-    <el-form-item class="search-item">
+    <!-- <el-form-item class="search-item">
       <el-row>
         <el-col :span="24">
           <el-input class="search-input" v-model="searchMatch" @keyup.enter.native="changeMatchMode()" :placeholder="$t('message.enter_to_search')" size="mini">
@@ -41,13 +50,43 @@
           </el-input>
         </el-col>
       </el-row>
+    </el-form-item> -->
+
+    <!-- autocomplete search input -->
+    <el-form-item class="search-item">
+      <el-autocomplete
+        class="search-input"
+        v-model="searchMatch"
+        @select="changeMatchMode"
+        @keyup.enter="changeMatchMode()"
+        :debounce="searchDebounce"
+        :fetch-suggestions="querySearch"
+        :placeholder="$t('message.enter_to_search')"
+        :trigger-on-focus="false"
+        :select-when-unmatched='true'>
+        <template slot="suffix">
+          <!-- cancel search -->
+          <i v-if="(searchIcon=='el-icon-loading') && showCancelIcon" class="el-input__icon search-icon el-icon-error" @click="cancelSearch()" :title="$t('el.messagebox.cancel')"></i>
+          <!-- start search -->
+          <i class="el-input__icon search-icon" :class="searchIcon"  @click="changeMatchMode()"></i>
+
+          <!-- extract search -->
+          <el-tooltip effect="dark" :content="$t('message.exact_search')" placement="bottom">
+            <el-checkbox v-model="searchExact"></el-checkbox>
+          </el-tooltip>
+        </template>
+      </el-autocomplete>
     </el-form-item>
 
     <!-- new key dialog -->
-    <el-dialog :title="$t('message.add_new_key')" :visible.sync="newKeyDialog" width="320px">
-      <el-form>
+    <el-dialog :title="$t('message.add_new_key')" :visible.sync="newKeyDialog" :close-on-click-modal='false' append-to-body>
+      <el-form label-position="top" size="mini">
+        <el-form-item :label="$t('message.key_name')">
+          <el-input v-model='newKeyName'></el-input>
+        </el-form-item>
+
         <el-form-item :label="$t('message.key_type')">
-          <el-select size="mini" v-model="selectedNewKeyType">
+          <el-select style='width: 100%' v-model="selectedNewKeyType">
               <el-option
                 v-for="(type, showType) in newKeyTypes"
                 :key="type"
@@ -70,83 +109,259 @@
 export default {
   data() {
     return {
-      dbs: [],
+      dbs: [0],
       selectedDbIndex: 0,
       searchMatch: '',
       searchExact: false,
       searchIcon: 'el-icon-search',
+      searchHistory: new Set(),
+      searchDebounce: 100,
       newKeyDialog: false,
+      newKeyName: '',
       selectedNewKeyType: 'string',
       newKeyTypes: {
-        String: 'string', Hash: 'hash', List: 'list', Set: 'set', Zset: 'zset',
+        String: 'string',
+        Hash: 'hash',
+        List: 'list',
+        Set: 'set',
+        Zset: 'zset',
+        Stream: 'stream',
+        ReJSON: 'rejson',
       },
+      dbKeysCount: {},
+      dbNames: {},
+      showCancelIcon: false,
+      rmCancelIconTimer: null,
     };
   },
-  props: ['client'],
+  props: ['client', 'config'],
   created() {
     this.$bus.$on('changeDb', (client, dbIndex) => {
-      if (client != this.client) {
+      if (!this.client || client.options.connectionName != this.client.options.connectionName) {
+        return;
+      }
+
+      if (this.client.condition.select == dbIndex) {
         return;
       }
 
       this.changeDb(dbIndex);
     });
+    this.$bus.$on('changeMatchMode', (client, pattern) => {
+      if (client !== this.client) {
+        return;
+      }
+
+      this.searchMatch = pattern;
+      this.changeMatchMode();
+    });
   },
   methods: {
     initShow() {
       this.initDatabaseSelect();
+      this.initCustomDbName();
+    },
+    setDb(db) {
+      this.selectedDbIndex = db;
     },
     initDatabaseSelect() {
-      this.client.configAsync('get', 'databases').then((reply) => {
-        if (reply[1]) {
-          this.dbs = [...Array(parseInt(reply[1])).keys()];
-        }
-        else {
-          this.dbs =  [...Array(16).keys()];
-        }
-      }).catch((err) => {
+      this.client.config('get', 'databases').then((reply) => {
+        this.dbs = [...Array(parseInt(reply[1])).keys()];
+        this.getDatabasesFromInfo();
+      }).catch((e) => {
         // config command may be renamed
-        this.dbs =  [...Array(16).keys()];
+        this.dbs = [...Array(16).keys()];
+        // read dbs from info
+        this.getDatabasesFromInfo(true);
       });
     },
-    changeDb(dbIndex = false) {
-      this.resetDb();
+    initCustomDbName() {
+      const dbKey = this.$storage.getStorageKeyByName('custom_db', this.config.connectionName);
+      const customNames = JSON.parse(localStorage.getItem(dbKey));
 
+      if (customNames) {
+        this.dbNames = customNames;
+      }
+    },
+    getDatabasesFromInfo(guessMaxDb = false) {
+      if (!this.client) {
+        return;
+      }
+
+      this.dbKeysCount = {};
+      this.client.info().then((info) => {
+        const keyspace = info.split('# Keyspace')[1].trim().split('\n');
+        let keyCount = [];
+
+        for (const line of keyspace) {
+          keyCount = line.match(/db(\d+)\:keys=(\d+)/);
+          keyCount && this.$set(this.dbKeysCount, keyCount[1], keyCount[2]);
+        }
+
+        if (!guessMaxDb || !keyCount || !keyCount[1]) {
+          return;
+        }
+        // max/last db which exists keys
+        const maxDb = parseInt(keyCount[1]);
+
+        if (maxDb > 16) {
+          this.dbs = [...Array(maxDb + 1).keys()];
+        }
+      }).catch(() => {});
+    },
+    resetStatus() {
+      this.dbs = [0];
+      // this.selectedDbIndex = 0;
+      this.searchMatch = '';
+      this.searchExact = false;
+    },
+    changeDb(dbIndex = false) {
       if (dbIndex !== false) {
         this.selectedDbIndex = parseInt(dbIndex);
       }
 
-      this.client.selectAsync(this.selectedDbIndex).then(() => {
-        this.$parent.$refs.keyList.refreshKeyList();
-      });
+      this.client.select(this.selectedDbIndex)
+        .then(() => {
+        // clear the search input
+          this.searchMatch = '';
+          this.$parent.$parent.$parent.$refs.keyList.refreshKeyList();
+          const dbKey = this.$storage.getStorageKeyByName('last_db', this.config.connectionName);
+          // store the last selected db
+          localStorage.setItem(dbKey, this.selectedDbIndex);
+          // tell cli to change db
+          this.client.options.db = this.selectedDbIndex;
+          this.$bus.$emit('changeDb', this.client, this.selectedDbIndex);
+        })
+      // select is not allowed in cluster mode
+        .catch((e) => {
+          this.$message.error({
+            message: e.message,
+            duration: 3000,
+          });
+
+          // reset to db0
+          this.selectedDbIndex = 0;
+        });
     },
-    resetDb() {
-      this.$parent.$refs.pagenation.pageIndex = 1;
-      this.$parent.$refs.keyList.scanCursorList = [0];
+    customDbName(db) {
+      const name = this.dbNames[db];
+
+      this.$prompt(this.$t('message.custom_name'), { inputValue: name }).then(({ value }) => {
+        this.$set(this.dbNames, db, value);
+        const dbKey = this.$storage.getStorageKeyByName('custom_db', this.config.connectionName);
+        localStorage.setItem(dbKey, JSON.stringify(this.dbNames));
+      }).catch(() => {});
     },
     addNewKey() {
-      this.$bus.$emit('addNewKey', this.client, this.selectedNewKeyType);
+      if (!this.newKeyName) {
+        return;
+      }
+
+      // key to buffer
+      const key = Buffer.from(this.newKeyName);
+
+      const promise = this.setDefaultValue(key, this.selectedNewKeyType);
+
+      promise.then(() => {
+        this.$bus.$emit('refreshKeyList', this.client, key, 'add');
+        this.$bus.$emit('clickedKey', this.client, key, true);
+      }).catch((e) => {
+        this.$message.error(e.message);
+      });
+
       this.newKeyDialog = false;
     },
+    setDefaultValue(key, type) {
+      switch (type) {
+        case 'string': {
+          return this.client.set(key, '');
+        }
+        case 'hash': {
+          return this.client.hset(key, 'New field', 'New value');
+        }
+        case 'list': {
+          return this.client.lpush(key, 'New member');
+        }
+        case 'set': {
+          return this.client.sadd(key, 'New member');
+        }
+        case 'zset': {
+          return this.client.zadd(key, 0, 'New member');
+        }
+        case 'stream': {
+          return this.client.xadd(key, '*', 'New key', 'New value');
+        }
+        case 'rejson': {
+          return this.client.call('JSON.SET', [key, '.', '{"New key":"New value"}']);
+        }
+      }
+    },
+    toggleCancelIcon(show = false) {
+      this.showCancelIcon = false;
+      clearTimeout(this.rmCancelIconTimer);
+
+      if (show) {
+        this.rmCancelIconTimer = setTimeout(() => {
+          this.showCancelIcon = true;
+        }, 800);
+      }
+    },
     changeMatchMode() {
-      this.resetDb();
+      // already searching status
+      // if (this.searchIcon == 'el-icon-loading') {
+      //   return false;
+      // }
 
-      let promise = this.$parent.$refs.keyList.refreshKeyList();
+      // prevent enter too fast but show candidate query
+      setTimeout(() => {
+        this.searchHistory.add(this.searchMatch);
+      }, this.searchDebounce + 100);
 
-      promise.then && promise.then(() => {
-        this.$message.success({
-          message: this.$t('message.refresh_success'),
-          duration: 1000,
-        });
+      this.$parent.$parent.$parent.$refs.keyList.refreshKeyList();
+    },
+    querySearch(input, cb) {
+      const items = [];
+
+      if (!this.searchHistory.size) {
+        return cb([]);
+      }
+
+      this.searchHistory.forEach((value) => {
+        if (value.toLowerCase().indexOf(input.toLowerCase()) !== -1) {
+          items.push({ value });
+        }
       });
+
+      cb(items);
+    },
+    cancelSearch() {
+      // stop scanning in keyList
+      this.$parent.$parent.$parent.$refs.keyList.cancelScanning();
+      // reset search status
+      this.$parent.$parent.$parent.$refs.keyList.resetSearchStatus();
     },
   },
-}
+};
 </script>
 
 <style type="text/css">
   .connection-menu .db-select {
     width: 100%;
+  }
+  .el-select-dropdown__item .db-select-key-count {
+    color: #a9a9ab;
+    font-size: 82%;
+    vertical-align: top;
+  }
+  .el-select-dropdown__item .db-select-custom-name {
+    float: right;
+    margin-left: 4px;
+  }
+
+  /*fix el-select height different from el-input*/
+  .connection-menu .db-select .el-input__inner, .connection-menu .new-key-btn {
+    /*margin-top: 0.5px;*/
+    height: 28px;
   }
   .connection-menu .new-key-btn {
     width: 100%;
@@ -155,8 +370,15 @@ export default {
     margin-top: -10px;
     margin-bottom: 15px;
   }
+  /*fix extract checkbox height*/
+  .connection-menu .search-item .el-input__suffix-inner {
+    display: inline-block;
+  }
+  .connection-menu .search-input {
+    width: 100%;
+  }
   .connection-menu .search-input .el-input__inner {
-    padding-right: 43px;
+    padding-right: 62px;
     /*margin-top: -10px;;
     margin-bottom: 15px;*/
   }
@@ -166,10 +388,11 @@ export default {
     top: 54%;
   }
   .connection-menu .el-submenu [class^=el-icon-] {
-    font-size: 13px;
+    font-size: 12px;
     margin: 0px;
     width: auto;
-    color: grey;
+    /*color: grey;*/
+    vertical-align: baseline;
   }
 
   .connection-menu .el-submenu.is-opened {
@@ -184,6 +407,7 @@ export default {
     font-size: 128%;
     color: #a5a8ad;
     cursor: pointer;
+    width: 20px;
   }
   .connection-menu .search-item .el-checkbox__input {
     /*line-height: 28px;*/

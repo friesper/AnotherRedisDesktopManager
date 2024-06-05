@@ -22,7 +22,7 @@
     <!-- server -->
     <el-col :span="8">
       <el-card class="box-card">
-        <div slot="header" class="clearfix">
+        <div slot="header">
           <i class="fa fa-server"></i>
           <span>{{ $t('message.server') }}</span>
         </div>
@@ -53,7 +53,7 @@
     <!-- memory row -->
     <el-col :span="8">
       <el-card class="box-card">
-        <div slot="header" class="clearfix">
+        <div slot="header">
           <i class="fa fa-microchip"></i>
           <span>{{ $t('message.memory') }}</span>
         </div>
@@ -61,21 +61,21 @@
         <p class="server-status-tag-p">
           <el-tag class='server-status-container' type="info" size="big">
             {{ $t('message.used_memory') }}:
-            <span class="server-status-text">{{this.connectionStatus.used_memory_human}}</span>
+            <span class="server-status-text">{{$util.humanFileSize(connectionStatus.used_memory)}}</span>
           </el-tag>
         </p>
 
         <p class="server-status-tag-p">
           <el-tag class='server-status-container' type="info" size="big">
             {{ $t('message.used_memory_peak') }}:
-            <span class="server-status-text">{{this.connectionStatus.used_memory_peak_human}}</span>
+            <span class="server-status-text">{{$util.humanFileSize(connectionStatus.used_memory_peak)}}</span>
           </el-tag>
         </p>
 
         <p class="server-status-tag-p">
           <el-tag class='server-status-container' type="info" size="big">
             {{ $t('message.used_memory_lua') }}:
-            <span class="server-status-text">{{Math.round(this.connectionStatus.used_memory_lua / 1024)}}K</span>
+            <span class="server-status-text">{{$util.humanFileSize(connectionStatus.used_memory_lua)}}</span>
           </el-tag>
         </p>
       </el-card>
@@ -84,7 +84,7 @@
     <!-- stats row -->
     <el-col :span="8">
       <el-card class="box-card">
-        <div slot="header" class="clearfix">
+        <div slot="header">
           <i class="fa fa-thermometer-three-quarters"></i>
           <span>{{ $t('message.stats') }}</span>
         </div>
@@ -113,21 +113,26 @@
     </el-col>
   </el-row>
 
-  <!-- key statistics -->
-  <el-row class="status-card">
+  <!-- cluster key statistics -->
+  <el-row v-if='connectionStatus.cluster_enabled=="1"' class="status-card">
     <el-col>
       <el-card class="box-card">
-        <div slot="header" class="clearfix">
+        <div slot="header">
           <i class="fa fa-bar-chart"></i>
           <span>{{ $t('message.key_statistics') }}</span>
         </div>
 
         <el-table
-          :data="DBKeys"
+          :data="clusterKeysInfo"
           stripe>
           <el-table-column
-            fixed
+            prop="name"
+            sortable
+            label="Node">
+          </el-table-column>
+          <el-table-column
             prop="db"
+            sortable
             label="DB">
           </el-table-column>
           <el-table-column
@@ -142,9 +147,53 @@
             label="Expires"
             :sort-method="sortByExpires">
           </el-table-column>
+          <!-- avg_ttl: tooltip can't be removed!, or the table's height will change -->
           <el-table-column
             sortable
             prop="avg_ttl"
+            :show-overflow-tooltip='true'
+            label="Avg TTL"
+            :sort-method="sortByTTL">
+          </el-table-column>
+        </el-table>
+      </el-card>
+    </el-col>
+  </el-row>
+
+  <!-- key statistics -->
+  <el-row v-else class="status-card">
+    <el-col>
+      <el-card class="box-card">
+        <div slot="header">
+          <i class="fa fa-bar-chart"></i>
+          <span>{{ $t('message.key_statistics') }}</span>
+        </div>
+
+        <el-table
+          :data="DBKeys"
+          stripe>
+          <el-table-column
+            prop="db"
+            sortable
+            label="DB">
+          </el-table-column>
+          <el-table-column
+            sortable
+            prop="keys"
+            label="Keys"
+            :sort-method="sortByKeys">
+          </el-table-column>
+          <el-table-column
+            sortable
+            prop="expires"
+            label="Expires"
+            :sort-method="sortByExpires">
+          </el-table-column>
+          <!-- avg_ttl: tooltip can't be removed!, or the table's height will change -->
+          <el-table-column
+            sortable
+            prop="avg_ttl"
+            :show-overflow-tooltip='true'
             label="Avg TTL"
             :sort-method="sortByTTL">
           </el-table-column>
@@ -157,21 +206,25 @@
   <el-row class="status-card">
     <el-col>
       <el-card class="box-card">
-        <div slot="header" class="clearfix">
+        <div slot="header">
           <i class="fa fa-info-circle"></i>
           <span>{{ $t('message.all_redis_info') }}</span>
+          <!-- search input -->
+          <el-input v-model='allInfoFilter' size='mini' suffix-icon="el-icon-search" class='status-filter-input'>
+          </el-input>
         </div>
 
         <el-table
           :data="AllRedisInfo"
           stripe>
           <el-table-column
-            fixed
             prop="key"
+            sortable
             label="Key">
           </el-table-column>
           <el-table-column
             prop="value"
+            :show-overflow-tooltip='true'
             label="Value">
           </el-table-column>
         </el-table>
@@ -179,10 +232,13 @@
     </el-col>
   </el-row>
 
+  <ScrollToTop parentNum='1'></ScrollToTop>
 </div>
 </template>
 
 <script>
+import ScrollToTop from '@/components/ScrollToTop';
+
 export default {
   data() {
     return {
@@ -191,34 +247,33 @@ export default {
       refreshInterval: 2000,
       connectionStatus: {},
       statusConnection: null,
+      allInfoFilter: '',
+      clusterKeysInfo: [],
     };
   },
-  props: ['client'],
+  props: ['client', 'hotKeyScope'],
+  components: { ScrollToTop },
   computed: {
     DBKeys() {
-      const dbs = [];
-
-      for (const i in this.connectionStatus) {
-        if (i.startsWith('db')) {
-          const item = this.connectionStatus[i];
-          const array = item.split(',');
-
-          dbs.push({
-            db: i,
-            keys: array[0].split('=')[1],
-            expires: array[1].split('=')[1],
-            avg_ttl: array[2].split('=')[1],
-          });
-        }
-      }
-
-      return dbs;
+      return this.initDbKeys(this.connectionStatus);
     },
     AllRedisInfo() {
       const infos = [];
+      const filter = this.allInfoFilter.toLowerCase();
 
-      for (const i in this.connectionStatus) {
-        infos.push({ key: i, value: this.connectionStatus[i] });
+      // filter mode
+      if (filter) {
+        for (const i in this.connectionStatus) {
+          if (i.includes(filter)) {
+            infos.push({ key: i, value: this.connectionStatus[i] });
+          }
+        }
+      }
+      // all info
+      else {
+        for (const i in this.connectionStatus) {
+          infos.push({ key: i, value: this.connectionStatus[i] });
+        }
       }
 
       return infos;
@@ -226,9 +281,24 @@ export default {
   },
   methods: {
     initShow() {
-      this.client.infoAsync().then((reply) => {
+      this.client.info().then((reply) => {
         this.connectionStatus = this.initStatus(reply);
+      }).catch((e) => {
+        // info command may be disabled
+        if (e.message.includes('unknown command')) {
+          this.$message.error({
+            message: this.$t('message.info_disabled'),
+            duration: 3000,
+          });
+        }
+        // no auth not show
+        else if (e.message.includes('NOAUTH')) {} else {
+          this.$message.error(e.message);
+        }
       });
+
+      // if cluster, init keys count in master nodes
+      this.initClusterKeys();
     },
     refreshInit() {
       this.refreshTimer && clearInterval(this.refreshTimer);
@@ -268,10 +338,72 @@ export default {
 
       return lines;
     },
+    initDbKeys(status, name = undefined) {
+      const dbs = [];
+
+      for (const i in status) {
+        // fix #1101 unexpected db prefix
+        // if (i.startsWith('db')) {
+        if (/^db\d+/.test(i)) {
+          const item = status[i];
+          const array = item.split(',');
+
+          dbs.push({
+            db: i,
+            keys: array[0] ? array[0].split('=')[1] : NaN,
+            expires: array[1] ? array[1].split('=')[1] : NaN,
+            avg_ttl: array[2] ? array[2].split('=')[1] : NaN,
+            name,
+          });
+        }
+      }
+
+      return dbs;
+    },
+    initClusterKeys() {
+      const nodes = this.client.nodes ? this.client.nodes('master') : [this.client];
+
+      // not in cluster mode
+      if (nodes.length < 2) {
+        return;
+      }
+
+      nodes.map((node) => {
+        node.call('INFO', 'KEYSPACE').then((reply) => {
+          const { options } = node;
+          const name = `${options.host}:${options.port}`;
+
+          const keys = this.initDbKeys(this.initStatus(reply), name);
+
+          // clear only when first reply, avoid jitter
+          if (this.clusterKeysInfo.length === nodes.length) {
+            this.clusterKeysInfo = [];
+          }
+
+          this.clusterKeysInfo = this.clusterKeysInfo.concat(keys);
+          // sort by node name
+          this.clusterKeysInfo.sort((a, b) => (a.name > b.name ? 1 : -1));
+        }).catch((e) => {
+          this.$message.error(e.message);
+        });
+      });
+    },
+    initShortcut() {
+      this.$shortcut.bind('ctrl+r, ⌘+r, f5', this.hotKeyScope, () => {
+        this.initShow();
+        return false;
+      });
+    },
   },
   mounted() {
     this.initShow();
     this.refreshInit();
+    this.initShortcut();
+  },
+  beforeDestroy() {
+    // clear interval when tab is closed
+    clearInterval(this.refreshTimer);
+    this.$shortcut.deleteScope(this.hotKeyScope);
   },
 };
 </script>
@@ -290,5 +422,17 @@ export default {
   }
   .server-status-text{
     color: #43b50b;
+  }
+  .status-filter-input {
+    float: right;
+    width: 100px;
+  }
+
+  /*fix table height changes[scrollTop changes] when tab toggled*/
+  .status-card .el-table__header-wrapper{
+      height: 50px;
+  }
+  .status-card .el-table__body-wrapper{
+      /*height: calc(100% - 50px) !important;*/
   }
 </style>

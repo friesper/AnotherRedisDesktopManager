@@ -38,11 +38,27 @@ export default {
 
       ipcRenderer.on('update-available', (event, arg) => {
         this.$notify.closeAll();
-        this.$notify({
-          title: `${this.$t('message.update_available')}: ${arg.version}, ${this.$t('message.update_downloading')}`,
+
+        const ignoreUpdateKey = `IgnoreUpdateVersion_${arg.version}`;
+        // version ignored
+        if (!this.manual && localStorage[ignoreUpdateKey]) {
+          return this.resetDownloadProcess();
+        }
+
+        this.$confirm(arg.releaseNotes, {
+          title: `${this.$t('message.update_available')}: ${arg.version}`,
+          confirmButtonText: this.$t('message.begin_update'),
+          cancelButtonText: this.$t('message.ignore_this_version'),
           dangerouslyUseHTMLString: true,
-          message: arg.releaseNotes.replace(/(\<a)/ig, '$1 target="blank"'),
-          duration: 0
+          duration: 0,
+        }).then(() => {
+          // update btn clicked
+          this.manual = true;
+          ipcRenderer.send('continue-update');
+        }).catch(() => {
+          // ignore this version
+          localStorage[ignoreUpdateKey] = true;
+          this.resetDownloadProcess();
         });
       });
 
@@ -53,25 +69,35 @@ export default {
         // latest version
         this.manual && this.$notify.success({
           title: this.$t('message.update_not_available'),
-          duration: 2000
+          duration: 2000,
         });
       });
 
       ipcRenderer.on('update-error', (event, arg) => {
-        // due to net problems
-        if (!arg.code) {
+        this.resetDownloadProcess();
+
+        let message = '';
+        const error = (arg.code ? arg.code : arg.message).toLowerCase();
+
+        // auto update check at app init
+        if (!this.manual || !error) {
           return;
         }
 
-        // this.$notify.closeAll();
-        this.resetDownloadProcess();
-        const message = (arg.code === 'ERR_UPDATER_ZIP_FILE_NOT_FOUND') ?
-          this.$t('message.mac_not_support_auto_update') :
-          (this.$t('message.update_error') + ': ' + arg.code);
+        // mac not support auto update
+        if (error.includes('zip') && error.includes('file')) {
+          message = this.$t('message.mac_not_support_auto_update');
+        }
+
+        // err_internet_disconnected err_name_not_resolved err_connection_refused
+        else {
+          message = `${this.$t('message.update_error')}: ${error}`;
+        }
 
         this.$notify.error({
-          title: message,
-          duration: 0
+          message,
+          duration: 0,
+          dangerouslyUseHTMLString: true,
         });
       });
 
@@ -91,7 +117,7 @@ export default {
           });
 
           this.downloadProcessShow = true;
-        };
+        }
 
         this.setProgressBar(Math.floor(arg.percent));
       });
@@ -102,12 +128,14 @@ export default {
         this.resetDownloadProcess();
         this.$notify.success({
           title: this.$t('message.update_downloaded'),
-          duration: 0
+          duration: 0,
         });
       });
     },
     setProgressBar(percent) {
-      this.downloadProcessShow && this.$set(this.$refs.downloadProgressBar, 'percentage', percent);
+      this.downloadProcessShow
+      && this.$refs.downloadProgressBar
+      && this.$set(this.$refs.downloadProgressBar, 'percentage', percent);
     },
     resetDownloadProcess() {
       this.updateChecking = false;
